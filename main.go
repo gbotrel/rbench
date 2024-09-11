@@ -3,9 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/exp/rand"
@@ -72,30 +75,46 @@ func main() {
 		fmt.Printf("error: %v\n", err)
 		return
 	}
-	defer terminateInstance(instanceID)
 
-	// // print status
-	fmt.Printf("\rssh ready (%s). uploading benchmark binary..."+clearStr, publicIP)
+	// Create a channel to listen for incoming signals
+	sigChan := make(chan os.Signal, 1)
+	// Notify the channel for interrupt (Ctrl+C) and termination signals
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 
-	// upload the binary
-	err = scp(benchFileName, publicIP)
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
+	go func() {
+		// print status
+		fmt.Printf("\rssh ready (%s). uploading benchmark binary..."+clearStr, publicIP)
 
-	fmt.Printf("\rrunning benchmark..." + clearStr + "\n")
-	// write header
-	fmt.Printf("ec2-user: %s\n", awsUserName)
-	fmt.Printf("instance type: %s\n", *instanceType)
-	fmt.Printf("commit ID: %s\n", commitID)
+		// upload the binary
+		err = scp(benchFileName, publicIP)
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+			close(sigChan)
+			return
+		}
 
-	// execute the benchmark
-	err = sshExec(publicIP)
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
+		fmt.Printf("\rrunning benchmark..." + clearStr + "\n")
+		// write header
+		fmt.Printf("ec2-user: %s\n", awsUserName)
+		fmt.Printf("instance IP: %s\n", publicIP)
+		fmt.Printf("instance type: %s\n", *instanceType)
+		fmt.Printf("commit ID: %s\n", commitID)
+
+		// execute the benchmark
+		err = sshExec(publicIP)
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+		}
+		close(sigChan)
+	}()
+
+	// Wait for a signal
+	<-sigChan
+	terminateInstance(instanceID)
+
+	// Exit the program gracefully
+	os.Exit(0)
+
 }
 
 func sshExec(publicIP string) error {
@@ -112,15 +131,23 @@ func sshExec(publicIP string) error {
 	}
 
 	cmd := exec.Command("ssh", args...)
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to run the benchmark: \nstdout: %s\nstderr: %s, %v", stdout.String(), stderr.String(), err)
+
+	// Stream stdout and stderr
+	stdoutPipe, _ := cmd.StdoutPipe()
+	stderrPipe, _ := cmd.StderrPipe()
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start the SSH command: %v", err)
 	}
 
-	fmt.Println(stdout.String())
-	fmt.Println(stderr.String())
+	// Goroutines to handle real-time streaming
+	go io.Copy(os.Stdout, stdoutPipe)
+	go io.Copy(os.Stderr, stderrPipe)
+
+	// Wait for the command to complete
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("failed to run the benchmark: %v", err)
+	}
 
 	return nil
 }
