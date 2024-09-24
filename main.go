@@ -31,6 +31,7 @@ var (
 	cpuFlag   = flag.Int("cpu", 0, "number of parallel CPUs to use")
 	benchMem  = flag.Bool("benchmem", false, "print memory allocation statistics")
 	run       = flag.String("run", "NONE", "run only those tests and examples matching the regular expression")
+	tagsFlag  = flag.String("tags", "", "a space-separated list of build tags")
 
 	// instance type
 	instanceType = flag.String("type", "t2.micro", "ec2 instance type")
@@ -168,7 +169,11 @@ func compileBenchmarkBinary() (fileName string, err error) {
 	// GOOS=linux GOARCH=amd64 go test -c -o /tmp/bench
 	benchFileName := "/tmp/bench-" + randString(7)
 
-	cmd := exec.Command("go", "test", "-c", "-o", benchFileName)
+	args := []string{"test", "-c", "-o", benchFileName}
+	if *tagsFlag != "" {
+		args = append(args, "-tags", *tagsFlag)
+	}
+	cmd := exec.Command("go", args...)
 	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64")
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
