@@ -64,12 +64,70 @@ func initAWS() error {
 	return nil
 }
 
-func startInstance() (publicIP, instanceID string, err error) {
+type instanceArch uint8
+
+const (
+	archUnknown instanceArch = iota
+	archArm
+	archX86
+)
+
+func (a instanceArch) GoString() string {
+	switch a {
+	case archArm:
+		return "arm64"
+	case archX86:
+		return "amd64"
+	default:
+		return "unknown"
+	}
+}
+
+func getInstanceArch() (arch instanceArch, err error) {
+	// Call DescribeInstanceTypes API
+	describeInstanceTypesInput := &ec2.DescribeInstanceTypesInput{
+		InstanceTypes: []types.InstanceType{
+			types.InstanceType(*instanceType),
+		},
+	}
+
+	describeInstanceTypesOutput, err := ec2Client.DescribeInstanceTypes(context.TODO(), describeInstanceTypesInput)
+	if err != nil {
+		return archUnknown, fmt.Errorf("unable to describe instance types, %v", err)
+	}
+
+	// we want to know if it's arm or x86
+	architecture := describeInstanceTypesOutput.InstanceTypes[0].ProcessorInfo.SupportedArchitectures[0]
+
+	if architecture == types.ArchitectureTypeArm64 {
+		return archArm, nil
+	}
+
+	return archX86, nil
+}
+
+func startInstance(arch instanceArch) (publicIP, instanceID string, err error) {
+
+	// 	Ubuntu Server 24.04 LTS (HVM), SSD Volume Type
+	// ami-0ea3c35c5c3284d82 (64-bit (x86)) / ami-01ebf7c0e446f85f9 (64-bit (Arm))
+
+	const (
+		x86AMI = "ami-0ea3c35c5c3284d82"
+		armAMI = "ami-01ebf7c0e446f85f9"
+	)
+
+	var ami string
+	if arch == archArm {
+		ami = armAMI
+	} else {
+		ami = x86AMI
+	}
+
 	// Define the parameters for the EC2 instance
 	instanceName := fmt.Sprintf("rbench/%s/%s", awsUserName, randString(7))
 
 	runResult, err := ec2Client.RunInstances(context.TODO(), &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-085f9c64a9b75eed5"), // Ubuntu Server 24.04 LTS
+		ImageId:      aws.String(ami), // Ubuntu Server 24.04 LTS
 		InstanceType: types.InstanceType(*instanceType),
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),

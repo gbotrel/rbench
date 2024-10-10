@@ -56,12 +56,6 @@ func main() {
 		return
 	}
 
-	benchFileName, err := compileBenchmarkBinary()
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
-
 	// init aws sdk objects
 	err = initAWS()
 	if err != nil {
@@ -69,9 +63,24 @@ func main() {
 		return
 	}
 
+	// get instance architecture
+	fmt.Printf("\rgetting instance architecture..." + clearStr)
+	arch, err := getInstanceArch()
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+		return
+	}
+
+	fmt.Printf("\rcompiling benchmark binary arch=%s..."+clearStr, arch.GoString())
+	benchFileName, err := compileBenchmarkBinary(arch)
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+		return
+	}
+
 	// create a new ec2 instance
 	fmt.Printf("\rstarting %s instance..."+clearStr, *instanceType)
-	publicIP, instanceID, err := startInstance()
+	publicIP, instanceID, err := startInstance(arch)
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
 		return
@@ -164,7 +173,45 @@ func scp(benchFileName, publicIP string) error {
 	return nil
 }
 
-func compileBenchmarkBinary() (fileName string, err error) {
+const lockFileName = ".rbench.lock"
+
+// acquireLock creates and acquires an exclusive lock on the lock file.
+func acquireLock() (*os.File, error) {
+	lockFile, err := os.OpenFile(lockFileName, os.O_CREATE|os.O_RDWR, 0666)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create lock file: %v", err)
+	}
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		lockFile.Close()
+		return nil, fmt.Errorf("failed to acquire lock: %v", err)
+	}
+
+	return lockFile, nil
+}
+
+// releaseLock releases the lock and closes the lock file.
+func releaseLock(lockFile *os.File) error {
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		return fmt.Errorf("failed to release lock: %v", err)
+	}
+
+	if err := lockFile.Close(); err != nil {
+		return fmt.Errorf("failed to close lock file: %v", err)
+	}
+
+	return nil
+}
+
+func compileBenchmarkBinary(arch instanceArch) (fileName string, err error) {
+	// lock current directory with a .rbench.lock file
+	// Acquire lock
+	lockFile, err := acquireLock()
+	if err != nil {
+		return "", err
+	}
+	defer releaseLock(lockFile)
+
 	// cross build the package
 	// GOOS=linux GOARCH=amd64 go test -c -o /tmp/bench
 	benchFileName := "/tmp/bench-" + randString(7)
@@ -174,7 +221,7 @@ func compileBenchmarkBinary() (fileName string, err error) {
 		args = append(args, "-tags", *tagsFlag)
 	}
 	cmd := exec.Command("go", args...)
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64")
+	cmd.Env = append(os.Environ(), "GOOS=linux", fmt.Sprintf("GOARCH=%s", arch.GoString()))
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
